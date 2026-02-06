@@ -1,0 +1,8 @@
+{
+  "name": "novel-fetcher-worker",
+  "compatibility_date": "2025-02-20",
+  "main": "src/index.ts",
+  "assets": {
+    "directory": "public"
+  }
+}

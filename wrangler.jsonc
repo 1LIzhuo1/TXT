@@ -1,5 +1,5 @@
 {
-  "name": "novel-fetcher-worker",
+  "name": "txt",
   "compatibility_date": "2025-02-20",
   "main": "src/index.ts",
   "assets": {

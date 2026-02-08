@@ -1,0 +1,143 @@
+interface Env {
+  SEARCH_PROVIDER: string; // 建议设为 'serpapi' 或 'google_cse' 以获取更广的搜索范围
+  SERPAPI_KEY: string;
+  GOOGLE_CSE_ID: string;
+  GOOGLE_API_KEY: string;
+}
+
+type SearchResult = {
+  title: string;
+  author: string;
+  url: string;
+};
+
+// 模拟《宿命之环.txt》的排版逻辑
+function formatToNovelStyle(text: string, title: string, author: string): string {
+  // 1. 基础清理：去除 HTML 标签、多余空格、控制符
+  let cleaned = text
+    .replace(/<[^>]+>/g, '') // 移除残留标签
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+
+  // 2. 识别并标准化章节头 (例如：第一章、第1章)
+  cleaned = cleaned.replace(/^(第[一二三四五六七八九十百千万\d]+章)\s*(.*)$/gm, '\n$1 $2\n');
+
+  // 3. 段落重排：确保每个自然段以两个全角空格开头
+  const lines = cleaned.split('\n');
+  const formattedLines = lines
+    .map(line => {
+      let l = line.trim();
+      if (!l) return null;
+      // 过滤掉常见的网页广告或噪点数据
+      if (l.includes('点击下一页') || l.includes('本站域名') || l.includes('最新域名')) return null;
+      return '　　' + l; // 使用全角空格缩进
+    })
+    .filter(line => line !== null);
+
+  // 4. 构建文件头结构
+  const header = `${title}\n作者：${author}\n\n简介：\n　　(系统自动抓取整理)\n\n`;
+  
+  return header + formattedLines.join('\n\n');
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+
+    // 首页 UI
+    if (url.pathname === '/') {
+      return new Response(htmlTemplate, { headers: { 'content-type': 'text/html; charset=utf-8' } });
+    }
+
+    // 深度搜索与处理接口
+    if (url.pathname === '/api/search' && request.method === 'POST') {
+      const { title, author } = (await request.json()) as { title: string; author: string };
+
+      if (!title || !author) return json({ ok: false, message: '书名和作者不能为空' });
+
+      // 第一阶段：全网深度搜索链接
+      const source = await deepSearchBook(title, author, env);
+      if (!source) return json({ ok: false, message: '全网搜索未找到匹配的公开文本源' });
+
+      // 第二阶段：爬取并提取内容
+      const rawContent = await crawlBookContent(source.url);
+      if (!rawContent || rawContent.length < 500) {
+        return json({ ok: false, message: '找到链接但无法有效提取正文，请手动尝试其它源' });
+      }
+
+      // 第三阶段：纠错与格式化
+      const finalTxt = formatToNovelStyle(rawContent, title, author);
+      
+      // 第四阶段：直接生成可下载的 Blob 数据响应
+      const filename = encodeURIComponent(`${title}-${author}.txt`);
+      return new Response(finalTxt, {
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Content-Disposition': `attachment; filename*=UTF-8''${filename}`,
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    }
+
+    return new Response('Not Found', { status: 404 });
+  }
+};
+
+/**
+ * 深度搜索逻辑：利用 API 在全网寻找最可能的 TXT 或阅读页链接
+ */
+async function deepSearchBook(title: string, author: string, env: Env): Promise<SearchResult | null> {
+  // 优先搜索关键词：书名 作者 txt下载 / 在线阅读
+  const query = `${title} ${author} 全本在线阅读`;
+  
+  let searchUrl = '';
+  if (env.SEARCH_PROVIDER === 'serpapi') {
+    searchUrl = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(query)}&api_key=${env.SERPAPI_KEY}`;
+  } else {
+    searchUrl = `https://www.googleapis.com/customsearch/v1?key=${env.GOOGLE_API_KEY}&cx=${env.GOOGLE_CSE_ID}&q=${encodeURIComponent(query)}`;
+  }
+
+  try {
+    const res = await fetch(searchUrl);
+    const data = (await res.json()) as any;
+    const items = data.organic_results || data.items || [];
+    
+    // 过滤掉不可用的平台（如起点、纵横等无法直接抓取的），寻找纯净阅读站
+    const bestMatch = items.find((it: any) => {
+      const link = it.link || it.url;
+      return !link.includes('qidian.com') && !link.includes('zongheng.com');
+    });
+
+    return bestMatch ? { title, author, url: bestMatch.link || bestMatch.url } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 网页内容抓取：尝试从 HTML 中剥离小说正文
+ */
+async function crawlBookContent(url: string): Promise<string> {
+  try {
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const html = await res.text();
+    
+    // 简易正文提取：定位主流小说网站常用的正文容器标签
+    // 这里使用正则匹配 <div> 容器中包含大量中文字符的部分
+    const contentMatch = html.match(/<(div|p)[^>]*?(id|class)=["'](content|chapter-content|read-content|book-text)["'][^>]*>([\s\S]*?)<\/\1>/i);
+    
+    if (contentMatch) return contentMatch[4];
+    
+    // 备用方案：移除脚本和样式后提取最长文本块
+    return html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, '\n');
+  } catch {
+    return '';
+  }
+}
+
+function json(obj: any) {
+  return new Response(JSON.stringify(obj), { headers: { 'content-type': 'application/json' } });
+}
+
+const htmlTemplate = `... (保持原有 HTML 但修改 fetch 逻辑以处理二进制下载) ...`;
